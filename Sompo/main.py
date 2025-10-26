@@ -1217,7 +1217,7 @@ def extract_text_from_file(file_bytes: bytes, filename: str, content_type: str) 
         prompt = """The data is in a tabular format in the provided image. Extract ALL rows and ALL columns from the table.
 
 Extract the data in JSON format where each object represents a row with the following key-value pairs:
-- "Segment": The GVW or vehicle category (e.g., "0T-3.5T", "3.5T-7.5T", "45T Plus")
+- "Segment": The GVW or any  vehicle category (e.g., "0T-3.5T", "3.5T-7.5T", "45T Plus")
 - "Policy Type": The policy type (e.g., "COMP/TP", use "COMP/TP" if not specified)
 - "Location": The region and state code (e.g., "East:CG", "West:MH")
 - "Payin": The payin value as a percentage (e.g., "23%", convert decimals like 0.625 to 62.5%)
@@ -1497,23 +1497,57 @@ def process_files(policy_file_bytes: bytes, policy_filename: str, policy_content
         # Parse with AI
         logger.info("🧠 Parsing policy data with AI...")
         
-        prompt_parse = f"""Analyze this insurance policy text and extract structured data from the table.
+        prompt_parse = f"""
+Analyze this insurance policy text and extract structured data.
 CRITICAL INSTRUCTIONS:
-1. ALWAYS return a valid JSON ARRAY (list) of objects.
-2. Extract EVERY ROW and EVERY COLUMN from the table.
-3. Each object must have these EXACT field names:
-   - "Segment": LOB + GVW category
-   - "Location": region and state code
-   - "Policy Type": policy type details
-   - "Payin": percentage value
+1. ALWAYS return a valid JSON ARRAY (list) of objects, even if there's only one record
+2. Each object must have these EXACT field names:
+   - "Segment": LOB + policy type (e.g., "TW TP", "PVT CAR COMP", "CV upto 2.5 Tn")
+   - "Location": location/region information (use "N/A" if not found)
+   - "Policy Type": policy type details (use "COMP/TP" if not specified)
+   - "Payin": percentage value (convert decimals: 0.625 → 62.5%, or keep as is: 34%)
    - "Doable District": district info (use "N/A" if not found)
-   - "Remarks": additional info (use "" if none)
+   - "Remarks": additional info including vehicle makes, age, transaction type, validity
 
-4. Ignore "Discount" and "CD1" columns completely.
-5. Return valid JSON array.
+3. For Segment field:
+   - Identify LOB: TW, PVT CAR, CV, BUS, TAXI, MISD
+   - Add policy type: TP, COMP, SAOD, etc.
+   - For CV: preserve tonnage (e.g., "CV upto 2.5 Tn")
+
+4. For Payin field:
+   - If you see decimals like 0.625, convert to 62.5%
+   - If you see whole numbers like 34, add % to make 34%
+   - If you see percentages, keep them as is
+   - Use the value from the "PO" column or any column that indicates payout/payin
+   - Do not use values from "Discount" column for Payin
+
+  5. For Remarks field - extract ALL additional info:
+   - Vehicle makes (Tata, Maruti, etc.) → "Vehicle Makes: Tata, Maruti"
+   - Age info (>5 years, etc.) → "Age: >5 years"
+   - Transaction type (New/Old/Renewal) → "Transaction: New"
+   - Validity dates → "Validity till: [date]"
+   - Decline RTO information (e.g., "Decline RTO: Dhar, Jhabua")
+   - Combine with semicolons: "Vehicle Makes: Tata; Age: >5 years; Transaction: New"
+ IGNORE these columns completely - DO NOT extract them:
+   - Discount
+   - CD1
+   - Any column containing "discount" or "cd1" 
+   - These are not needed for our analysis
+
+   
+NOTE:
+- Taxi PCV comes under the category of Taxi
+- Multiple columns are there which has payouts based on either policy type or fuel type , so consider that as payin
+- PCV < 6 STR comes under Taxi
+-PC means Private Car and STP = TP
+- Kali Pilli or Kaali Pilli means Taxi and it comes under Taxi
+- If in SGEMENT OF Private Car , SAOD mentinoned then it comes into PVT CAR COMP + SAOD segment , also same for COMP
+Here is the training Data:
+I am training you
 
 Text to analyze:
 {extracted_text}
+
 """
        
         response = client.chat.completions.create(
