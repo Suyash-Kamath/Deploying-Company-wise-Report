@@ -1163,7 +1163,7 @@ app = FastAPI(title="Insurance Policy Processing System")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://somporeportsfrontend-kww900cxn-suyash-kamaths-projects-54f967e2.vercel.app"],
+    allow_origins=["https://somporeportsfrontend.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
