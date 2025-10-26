@@ -1,38 +1,51 @@
-import os
-from fastapi import FastAPI, File, UploadFile, HTTPException,Form
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
 from io import BytesIO
 import base64
 import json
+import os
+from dotenv import load_dotenv
 import logging
 import re
 import pandas as pd
 from openai import OpenAI
-from dotenv import load_dotenv
-from typing import Dict, List, Optional
-import openpyxl
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font, Alignment
+from pathlib import Path
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Load OpenAI API key
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY environment variable not set. Please set it in your .env file or environment variables.")
+    logger.error("⚠️ OPENAI_API_KEY environment variable not set")
+    raise RuntimeError("OPENAI_API_KEY environment variable not set. Please create a .env file with OPENAI_API_KEY=your-key")
 
 # Initialize OpenAI client
 try:
     client = OpenAI(api_key=OPENAI_API_KEY)
+    logger.info("✅ OpenAI client initialized successfully")
 except Exception as e:
-    logger.error(f"Failed to initialize OpenAI client: {str(e)}")
-    raise
+    logger.error(f"❌ Failed to initialize OpenAI client: {str(e)}")
+    raise RuntimeError(f"Failed to initialize OpenAI client: {str(e)}")
+
+app = FastAPI(title="Insurance Policy Processing System")
+
+# Add CORS middleware for frontend compatibility
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://tata-reports.vercel.app"],  # Adjust to specific origins in production, e.g., ["https://your-frontend.com"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Embedded Formula Data
 FORMULA_DATA = [
@@ -42,7 +55,6 @@ FORMULA_DATA = [
     {"LOB": "TW", "SEGMENT": "TW SAOD + COMP", "INSURER": "DIGIT", "PO": "-3%", "REMARKS": "Payin 21% to 30%"},
     {"LOB": "TW", "SEGMENT": "TW SAOD + COMP", "INSURER": "DIGIT", "PO": "-4%", "REMARKS": "Payin 31% to 50%"},
     {"LOB": "TW", "SEGMENT": "TW SAOD + COMP", "INSURER": "DIGIT", "PO": "-5%", "REMARKS": "Payin Above 50%"},
-    {"LOB": "TW", "SEGMENT": "TW TP", "INSURER": "Bajaj, Digit, ICICI", "PO": "-2%", "REMARKS": "Payin Below 20%"},
     {"LOB": "TW", "SEGMENT": "TW TP", "INSURER": "Bajaj, Digit, ICICI", "PO": "-3%", "REMARKS": "Payin Above 20%"},
     {"LOB": "TW", "SEGMENT": "TW TP", "INSURER": "Rest of Companies", "PO": "-2%", "REMARKS": "Payin Below 20%"},
     {"LOB": "TW", "SEGMENT": "TW TP", "INSURER": "Rest of Companies", "PO": "-3%", "REMARKS": "Payin 21% to 30%"},
@@ -51,8 +63,8 @@ FORMULA_DATA = [
     {"LOB": "PVT CAR", "SEGMENT": "PVT CAR COMP + SAOD", "INSURER": "All Companies", "PO": "90% of Payin", "REMARKS": "All Fuel"},
     {"LOB": "PVT CAR", "SEGMENT": "PVT CAR TP", "INSURER": "Bajaj, Digit, SBI", "PO": "-2%", "REMARKS": "Payin Below 20%"},
     {"LOB": "PVT CAR", "SEGMENT": "PVT CAR TP", "INSURER": "Bajaj, Digit, SBI", "PO": "-3%", "REMARKS": "Payin Above 20%"},
-    {"LOB": "PVT CAR", "SEGMENT": "PVT CAR TP", "INSURER": "Rest of Companies", "PO": "90% of Payin", "REMARKS": "Zuno -  21"},
-    {"LOB": "CV", "SEGMENT": "Upto 2.5 GVW", "INSURER": "Reliance, SBI, Tata", "PO": "-2%", "REMARKS": "NIL"},
+    {"LOB": "PVT CAR", "SEGMENT": "PVT CAR TP", "INSURER": "Rest of Companies", "PO": "90% of Payin", "REMARKS": "Zuno - 21"},
+    {"LOB": "CV", "SEGMENT": "Upto 2.5 GVW", "INSURER": "Reliance, SBI", "PO": "-2%", "REMARKS": "NIL"},
     {"LOB": "CV", "SEGMENT": "All GVW & PCV 3W, GCV 3W", "INSURER": "Rest of Companies", "PO": "-2%", "REMARKS": "Payin Below 20%"},
     {"LOB": "CV", "SEGMENT": "All GVW & PCV 3W, GCV 3W", "INSURER": "Rest of Companies", "PO": "-3%", "REMARKS": "Payin 21% to 30%"},
     {"LOB": "CV", "SEGMENT": "All GVW & PCV 3W, GCV 3W", "INSURER": "Rest of Companies", "PO": "-4%", "REMARKS": "Payin 31% to 50%"},
@@ -67,22 +79,12 @@ FORMULA_DATA = [
     {"LOB": "MISD", "SEGMENT": "Misd, Tractor", "INSURER": "All Companies", "PO": "88% of Payin", "REMARKS": "NIL"}
 ]
 
-app = FastAPI()
-
-# Enable CORS to allow frontend requests (e.g., from Vercel)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Update with specific origins in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 def extract_text_from_file(file_bytes: bytes, filename: str, content_type: str) -> str:
     """Extract text from uploaded image file using OCR with enhanced prompting"""
     file_extension = filename.split('.')[-1].lower() if '.' in filename else ''
     file_type = content_type if content_type else file_extension
 
+    # Image-based extraction with enhanced OCR
     image_extensions = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff']
     if file_extension in image_extensions or file_type.startswith('image/'):
         try:
@@ -213,15 +215,15 @@ def apply_formula_directly(policy_data, company_name):
             
             if any(tw_keyword in segment_upper for tw_keyword in ['TW', '2W', 'TWO WHEELER', 'TWO-WHEELER']):
                 lob = "TW"
-            elif any(car_keyword in segment_upper for car_keyword in ['PVT CAR', 'PRIVATE CAR', 'CAR', 'PVTCAR']):
+            elif any(car_keyword in segment_upper for car_keyword in ['PVT CAR', 'PRIVATE CAR', 'CAR', 'PCI']):
                 lob = "PVT CAR"
-            elif any(cv_keyword in segment_upper for cv_keyword in ['CV', 'COMMERCIAL', 'LCV', 'GVW', 'TN', 'GCW']):
+            elif any(cv_keyword in segment_upper for cv_keyword in ['CV', 'COMMERCIAL', 'LCV', 'GVW', 'TN', 'UPTO', 'ALL GVW', 'PCV', 'GCV']):
                 lob = "CV"
             elif 'BUS' in segment_upper:
                 lob = "BUS"
             elif 'TAXI' in segment_upper:
                 lob = "TAXI"
-            elif any(misd_keyword in segment_upper for misd_keyword in ['MISD', 'TRACTOR', 'MISC']):
+            elif any(misd_keyword in segment_upper for misd_keyword in ['MISD', 'TRACTOR', 'MISC', 'AMBULANCE', 'POLICE VAN', 'GARBAGE VAN']):
                 lob = "MISD"
             else:
                 remarks_upper = str(record.get('Remarks', '')).upper()
@@ -255,20 +257,19 @@ def apply_formula_directly(policy_data, company_name):
                         if any(keyword in segment_upper for keyword in ["UPTO 2.5", "2.5 TN", "2.5 GVW", "2.5TN", "2.5GVW", "UPTO2.5"]):
                             segment_match = True
                     elif "ALL GVW" in rule_segment:
-                        if not any(keyword in segment_upper for keyword in ["UPTO 2.5", "2.5 TN", "2.5 GVW", "2.5TN", "2.5GVW", "UPTO2.5", "2.5"]):
-                            segment_match = True
+                        segment_match = True
                 elif lob == "BUS":
                     if matched_segment == rule_segment:
                         segment_match = True
                 elif lob == "PVT CAR":
-                    if "COMP" in rule_segment and any(keyword in segment for keyword in ["COMP", "COMPREHENSIVE"]):
+                    if "COMP" in rule_segment and any(keyword in segment for keyword in ["COMP", "COMPREHENSIVE", "PACKAGE", "1ST PARTY", "1+1"]):
                         segment_match = True
                     elif "TP" in rule_segment and "TP" in segment and "COMP" not in segment:
                         segment_match = True
                 elif lob == "TW":
-                    if "1+5" in rule_segment and "1+5" in segment:
+                    if "1+5" in rule_segment and any(keyword in segment for keyword in ["1+5", "NEW", "FRESH"]):
                         segment_match = True
-                    elif "SAOD + COMP" in rule_segment and any(keyword in segment for keyword in ["SAOD", "COMP"]):
+                    elif "SAOD + COMP" in rule_segment and any(keyword in segment for keyword in ["SAOD", "COMP", "PACKAGE", "1ST PARTY", "1+1"]):
                         segment_match = True
                     elif "TP" in rule_segment and "TP" in segment:
                         segment_match = True
@@ -363,17 +364,26 @@ def apply_formula_directly(policy_data, company_name):
     
     return calculated_data
 
-def process_files(policy_file_bytes: bytes, policy_filename: str, policy_content_type: str, company_name: str) -> Dict:
+def process_files(policy_file_bytes: bytes, policy_filename: str, policy_content_type: str, company_name: str):
     """Main processing function with enhanced error handling"""
     try:
+        logger.info("=" * 50)
+        logger.info(f"🚀 Starting file processing for {policy_filename}...")
+        logger.info(f"📁 File size: {len(policy_file_bytes)} bytes")
+        
+        # Extract text
+        logger.info("🔍 Extracting text from policy image...")
         extracted_text = extract_text_from_file(policy_file_bytes, policy_filename, policy_content_type)
-        logger.info(f"Extracted text length: {len(extracted_text)}")
+        logger.info(f"✅ Extracted text length: {len(extracted_text)} chars")
 
         if not extracted_text.strip():
             logger.error("No text extracted from the image")
             raise ValueError("No text could be extracted. Please ensure the image is clear and contains readable text.")
 
-        parse_prompt = f"""Analyze this insurance policy text and extract structured data.
+        # Parse with AI
+        logger.info("🧠 Parsing policy data with AI...")
+        
+        parse_prompt="""Analyze this insurance policy text and extract structured data.
 
 Company Name: {company_name}
 
@@ -723,47 +733,48 @@ Below, in-depth analysis for **each and every image** (numbered 1-6 based on ord
 - Trend: Urban bias (Mumbai/Pune high); matches previous set's Image 4. Compared to Kolkata-focused (Images 3/5), higher overall – regional disparity. Anomalies: No Diesel rates – perhaps in separate grids; ties to spreadsheets in prior set (e.g., 67.5% Mumbai PCV 3W).
 
 Text to analyze:
-{extracted_text}
-
+{extracted_text}        
+        
 """
-        
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are a data extraction expert. Extract policy data as a JSON array. Convert all Payin values to percentage format. Always return valid JSON array with complete field names. Extract all additional information for remarks."
-                },
-                {"role": "user", "content": parse_prompt}
-            ],
-            temperature=0.0,
-            max_tokens=4000
-        )
-        
-        parsed_json = response.choices[0].message.content.strip()
-        logger.info(f"Raw parsing response: {parsed_json[:500]}...")
-        
-        cleaned_json = clean_json_response(parsed_json)
-        logger.info(f"Cleaned JSON: {cleaned_json[:500]}...")
-        
         try:
-            policy_data = json.loads(cleaned_json)
-            policy_data = ensure_list_format(policy_data)
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": "You are a data extraction expert. Extract policy data as a JSON array. Convert all Payin values to percentage format. Always return valid JSON array with complete field names. Extract all additional information for remarks."
+                    },
+                    {"role": "user", "content": parse_prompt}
+                ],
+                temperature=0.0,
+                max_tokens=4000
+            )
             
-            if not policy_data or len(policy_data) == 0:
-                raise ValueError("Parsed data is empty")
+            parsed_json = response.choices[0].message.content.strip()
+            logger.info(f"Raw parsing response length: {len(parsed_json)}")
+            
+            cleaned_json = clean_json_response(parsed_json)
+            logger.info(f"Cleaned JSON length: {len(cleaned_json)}")
+            
+            try:
+                policy_data = json.loads(cleaned_json)
+                policy_data = ensure_list_format(policy_data)
                 
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {str(e)} with cleaned JSON: {cleaned_json}")
-            policy_data = [{
-                "Segment": "Unknown",
-                "Location": "N/A",
-                "Policy Type": "N/A", 
-                "Payin": "0%",
-                "Doable District": "N/A",
-                "Remarks": f"Failed to parse - please check image quality. Extract manually from: {extracted_text[:200]}"
-            }]
+                if not policy_data or len(policy_data) == 0:
+                    raise ValueError("Parsed data is empty")
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {str(e)} with cleaned JSON: {cleaned_json[:500]}...")
+                raise ValueError(f"JSON parsing failed: {str(e)}")
+        
+        except Exception as e:
+            logger.error(f"Error in AI parsing: {str(e)}")
+            raise ValueError(f"AI parsing failed: {str(e)}")
 
+        logger.info(f"✅ Successfully parsed {len(policy_data)} policy records")
+
+        # Classify payin
+        logger.info("🧮 Classifying payin values...")
         for record in policy_data:
             try:
                 if 'Discount' in record:
@@ -776,14 +787,22 @@ Text to analyze:
                 record['Payin_Value'] = 0.0
                 record['Payin_Category'] = "Payin Below 20%"
 
+        # Apply formulas
+        logger.info("🧮 Applying formulas and calculating payouts...")
         calculated_data = apply_formula_directly(policy_data, company_name)
         
         if not calculated_data or len(calculated_data) == 0:
+            logger.error("No data after formula application")
             raise ValueError("No data after formula application")
 
+        logger.info(f"✅ Successfully calculated {len(calculated_data)} records")
+
+        # Create Excel
+        logger.info("📊 Creating Excel file...")
         df_calc = pd.DataFrame(calculated_data)
         
         if df_calc.empty:
+            logger.error("DataFrame is empty")
             raise ValueError("DataFrame is empty")
 
         output = BytesIO()
@@ -791,22 +810,19 @@ Text to analyze:
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_calc.to_excel(writer, sheet_name='Policy Data', startrow=2, index=False)
                 worksheet = writer.sheets['Policy Data']
-
                 headers = list(df_calc.columns)
                 for col_num, value in enumerate(headers, 1):
                     cell = worksheet.cell(row=3, column=col_num, value=value)
-                    cell.font = Font(bold=True)
-
+                    cell.font = cell.font.copy(bold=True)
                 if len(headers) > 1:
                     company_cell = worksheet.cell(row=1, column=1, value=company_name)
                     worksheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
-                    company_cell.font = Font(bold=True, size=14)
-                    company_cell.alignment = Alignment(horizontal='center')
-
+                    company_cell.font = company_cell.font.copy(bold=True, size=14)
+                    company_cell.alignment = company_cell.alignment.copy(horizontal='center')
                     title_cell = worksheet.cell(row=2, column=1, value='Policy Data with Payin and Calculated Payouts')
                     worksheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(headers))
-                    title_cell.font = Font(bold=True, size=12)
-                    title_cell.alignment = Alignment(horizontal='center')
+                    title_cell.font = title_cell.font.copy(bold=True, size=12)
+                    title_cell.alignment = title_cell.alignment.copy(horizontal='center')
                 else:
                     worksheet.cell(row=1, column=1, value=company_name)
                     worksheet.cell(row=2, column=1, value='Policy Data with Payin and Calculated Payouts')
@@ -817,51 +833,129 @@ Text to analyze:
 
         output.seek(0)
         excel_data = output.read()
+        excel_data_base64 = base64.b64encode(excel_data).decode('utf-8')
 
+        # Calculate metrics
+        avg_payin = sum([r.get('Payin_Value', 0) for r in calculated_data]) / len(calculated_data) if calculated_data else 0.0
+        unique_segments = len(set([r.get('Segment', 'N/A') for r in calculated_data]))
+        formula_summary = {}
+        for record in calculated_data:
+            formula = record.get('Formula Used', 'Unknown')
+            formula_summary[formula] = formula_summary.get(formula, 0) + 1
+
+        logger.info("✅ Processing completed successfully")
+        logger.info("=" * 50)
+        
         return {
             "extracted_text": extracted_text,
             "parsed_data": policy_data,
             "calculated_data": calculated_data,
-            "excel_data": excel_data.decode('latin1'),  # Encode as base64 or string for API response
-            "df_calc": df_calc.to_dict(orient='records')
+            "excel_data": excel_data_base64,
+            "csv_data": df_calc.to_csv(index=False),
+            "json_data": json.dumps(calculated_data, indent=2),
+            "formula_data": FORMULA_DATA,
+            "metrics": {
+                "total_records": len(calculated_data),
+                "avg_payin": round(avg_payin, 1),
+                "unique_segments": unique_segments,
+                "company_name": company_name,
+                "formula_summary": formula_summary
+            }
         }
 
     except Exception as e:
         logger.error(f"Unexpected error in process_files: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+        raise
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Serve a basic HTML frontend or instructions"""
+    try:
+        html_path = Path("index.html")
+        if html_path.exists():
+            with open(html_path, "r", encoding="utf-8") as f:
+                html_content = f.read()
+            return HTMLResponse(content=html_content)
+        else:
+            html_content = """
+            <h1>Insurance Policy Processing System</h1>
+            <p>Welcome to the Insurance Policy Processing API.</p>
+            <h2>Usage Instructions:</h2>
+            <ul>
+                <li><b>Endpoint:</b> POST /process</li>
+                <li><b>Parameters:</b>
+                    <ul>
+                        <li><b>company_name</b>: String (form-data, required)</li>
+                        <li><b>policy_file</b>: Image file (PNG, JPG, JPEG, GIF, BMP, TIFF; file upload, required)</li>
+                    </ul>
+                </li>
+                <li><b>Response:</b> JSON object containing extracted text, parsed data, calculated data, Excel/CSV/JSON files, and metrics.</li>
+                <li><b>Health Check:</b> GET /health</li>
+            </ul>
+            <h2>Features:</h2>
+            <ul>
+                <li>AI-powered OCR using GPT-4o for text extraction</li>
+                <li>Structured data parsing with detailed remarks</li>
+                <li>Payout calculations based on embedded formula rules</li>
+                <li>Downloadable Excel, CSV, and JSON outputs</li>
+            </ul>
+            """
+            return HTMLResponse(content=html_content)
+    except Exception as e:
+        logger.error(f"Error serving HTML: {str(e)}")
+        return HTMLResponse(content=f"<h1>Error loading page</h1><p>{str(e)}</p>", status_code=500)
+
+@app.post("/process")
+async def process_policy(company_name: str = Form(...), policy_file: UploadFile = File(...)):
+    """Process policy image and return extracted and calculated data"""
+    try:
+        logger.info("=" * 50)
+        logger.info(f"📨 Received request for company: {company_name}")
+        logger.info(f"📄 File: {policy_file.filename}, Content-Type: {policy_file.content_type}")
+        
+        # Read file
+        policy_file_bytes = await policy_file.read()
+        if len(policy_file_bytes) == 0:
+            logger.error("Uploaded file is empty")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Uploaded file is empty"}
+            )
+
+        logger.info(f"📦 File size: {len(policy_file_bytes)} bytes")
+        
+        # Process
+        results = process_files(
+            policy_file_bytes, 
+            policy_file.filename, 
+            policy_file.content_type,
+            company_name
+        )
+        
+        logger.info("✅ Returning results to client")
+        return JSONResponse(content=results)
+        
+    except ValueError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return JSONResponse(
+            status_code=400,
+            content={"error": str(e)}
+        )
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Processing failed: {str(e)}"}
+        )
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "message": "Server is running"}
-
-@app.post("/process")
-async def process_policy(
-    company_name: str = Form(...),
-    policy_file: UploadFile = File(...)
-):
-    """Process uploaded policy image and return calculated data"""
-    try:
-        file_bytes = await policy_file.read()
-        
-        if len(file_bytes) == 0:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty. Please upload a valid image.")
-
-        results = process_files(file_bytes, policy_file.filename, policy_file.content_type, company_name)
-
-        return JSONResponse(
-            content={
-                "status": "success",
-                "data": results
-            }
-        )
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error in /process endpoint: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+    return JSONResponse(content={"status": "healthy", "message": "Server is running"})
 
 if __name__ == "__main__":
     import uvicorn
+    logger.info("🚀 Starting Insurance Policy Processing System...")
+    logger.info("📡 Server will be available at: http://localhost:8000")
+    logger.info("🔑 OpenAI API Key is configured: ✅")
     uvicorn.run(app, host="0.0.0.0", port=8000)
